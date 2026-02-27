@@ -350,7 +350,7 @@ def run_totp_display(secret: str, settings: dict, oled, encoder, wifi_watchdog=N
             if secs_left < 0: 
                 secs_left = 0.0
                 
-            code = "123456"
+            code = totp.now()
             if code != last_code:
                 print(f"[DEBUG] New TOTP code: {code} (loop {loop_count})")
                 last_code = code

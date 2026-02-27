@@ -1,0 +1,10 @@
+flask
+werkzeug
+luma.oled
+smbus2
+python-periphery
+pyotp
+pillow
+pyzbar
+rpi_ws281x
+RPi.GPIO

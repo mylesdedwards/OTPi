@@ -480,6 +480,7 @@ class WifiWatchdog:
     def __init__(self):
         self.connected = False
         self.ssid = ""
+        self.ip = ""
         self._thread = None
         self._stop = False
         self._last_ntp = time.time()  # assume we just synced at boot
@@ -526,6 +527,7 @@ class WifiWatchdog:
         status = get_wifi_status()
         self.connected = status["connected"]
         self.ssid = status["ssid"]
+        self.ip = status.get("ip", "")
 
 def ensure_dirs():
     SECRETS_DIR.mkdir(parents=True, exist_ok=True)
@@ -896,9 +898,9 @@ def main():
                 except Exception:
                     pass
 
-                debug_print("About to restart program...")
-                time.sleep(0.25)
-                restart_program()
+                debug_print("Setup complete, rebooting device...")
+                time.sleep(1)
+                os.system("sudo reboot")
                 return  # not reached
 
         # 3) All set: we have Wi-Fi and an OTP secret

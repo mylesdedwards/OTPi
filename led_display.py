@@ -366,7 +366,7 @@ def run_totp_display(secret: str, settings: dict, oled, encoder, wifi_watchdog=N
             # Pipe WiFi status from watchdog to OLED UI
             if wifi_watchdog is not None:
                 try:
-                    ui.set_wifi_status(wifi_watchdog.connected, wifi_watchdog.ssid)
+                    ui.set_wifi_status(wifi_watchdog.connected, wifi_watchdog.ssid, wifi_watchdog.ip)
                 except Exception:
                     pass
                 

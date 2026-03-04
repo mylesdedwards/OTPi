@@ -93,14 +93,16 @@ class OledUI:
         # WiFi status (updated externally via set_wifi_status)
         self._wifi_ssid = ""
         self._wifi_connected = False
+        self._wifi_ip = ""
 
         print(f"[UI] Initialized on screen {self.screen}")
         print(f"[UI] Loaded settings: hue={self.hue:.3f}, brightness={self.user_pct}%, lang={self._lang_codes[self._lang_idx]}")
 
-    def set_wifi_status(self, connected: bool, ssid: str = ""):
+    def set_wifi_status(self, connected: bool, ssid: str = "", ip: str = ""):
         """Called externally to update WiFi status shown on info screen."""
         self._wifi_connected = connected
         self._wifi_ssid = ssid
+        self._wifi_ip = ip
 
     def _load_settings(self) -> dict:
         """Load user settings from JSON file"""
@@ -419,7 +421,12 @@ class OledUI:
                     draw.text((0, 25), f"{t('hue')}  : {int(self.hue*360):3d}\xb0", fill=1)
                     draw.text((0, 37), f"{t('bright')}: {self.user_pct:3d}%", fill=1)
                     # WiFi status line
-                    wifi_txt = "WiFi: OK" if self._wifi_connected else "WiFi: --"
+                    if self._wifi_connected and self._wifi_ip:
+                        wifi_txt = self._wifi_ip
+                    elif self._wifi_connected:
+                        wifi_txt = "WiFi: OK"
+                    else:
+                        wifi_txt = "WiFi: --"
                     draw.text((0, 52), wifi_txt, fill=1)
 
                 elif self.screen == 1:

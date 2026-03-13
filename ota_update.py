@@ -35,17 +35,9 @@ CONFIG_FILE  = PROJECT_DIR / "ota_config.json"
 # ── Default configuration ──────────────────────────────────────────
 # Override by creating ota_config.json next to this script.
 OTA_CONFIG = {
-    # GitHub raw URL — change <OWNER>/<REPO>/<BRANCH> to your repo
-    "version_url": "https://raw.githubusercontent.com/mylesdedwards/OTPi/master/version.txt",
-    "bundle_url":  "https://raw.githubusercontent.com/mylesdedwards/OTPi/master/otpi_update.tar.gz",
-
-    # Alternatively, use GitHub Releases (uncomment and edit):
-    # "version_url": "https://github.com/OWNER/REPO/releases/latest/download/version.txt",
-    # "bundle_url":  "https://github.com/OWNER/REPO/releases/latest/download/otpi_update.tar.gz",
-
-    # Or any HTTP server:
-    # "version_url": "https://updates.example.com/otpi/version.txt",
-    # "bundle_url":  "https://updates.example.com/otpi/otpi_update.tar.gz",
+    # GitHub Releases URL — always points to latest release
+    "version_url": "https://github.com/mylesdedwards/OTPi/releases/latest/download/version.txt",
+    "bundle_url":  "https://github.com/mylesdedwards/OTPi/releases/latest/download/otpi_update.tar.gz",
 
     # Service name to restart after update (set to "" to skip restart)
     "service_name": "otpi.service",
@@ -91,6 +83,52 @@ def _load_config() -> dict:
     except Exception as e:
         _log(f"Config load error: {e}, using defaults")
     return config
+
+
+def _migrate_config():
+    """
+    One-time migration: rewrite ota_config.json from old raw.githubusercontent
+    URLs to GitHub Releases URLs. This runs silently and only changes the file
+    if old URLs are detected.
+    """
+    OLD_RAW = "raw.githubusercontent.com/mylesdedwards/OTPi"
+    NEW_VERSION = "https://github.com/mylesdedwards/OTPi/releases/latest/download/version.txt"
+    NEW_BUNDLE  = "https://github.com/mylesdedwards/OTPi/releases/latest/download/otpi_update.tar.gz"
+
+    try:
+        if not CONFIG_FILE.exists():
+            return
+
+        with open(CONFIG_FILE) as f:
+            cfg = json.load(f)
+
+        changed = False
+
+        if OLD_RAW in cfg.get("version_url", ""):
+            cfg["version_url"] = NEW_VERSION
+            changed = True
+
+        if OLD_RAW in cfg.get("bundle_url", ""):
+            cfg["bundle_url"] = NEW_BUNDLE
+            changed = True
+
+        if changed:
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(cfg, f, indent=4)
+                f.write("\n")
+            _log("Migrated ota_config.json to GitHub Releases URLs")
+
+    except Exception as e:
+        _log(f"Config migration error: {e}")
+
+
+def _parse_version(v: str) -> tuple:
+    """Parse a version string like '1.2.3' into a tuple (1, 2, 3) for comparison."""
+    try:
+        parts = v.strip().split(".")
+        return tuple(int(p) for p in parts)
+    except (ValueError, AttributeError):
+        return (0, 0, 0)
 
 
 def _get_local_version() -> str:
@@ -298,7 +336,7 @@ def check_for_update(config: dict = None) -> dict:
         _log("Could not reach update server")
         return {"available": False, "local": local_ver, "remote": None, "error": "unreachable"}
 
-    available = remote_ver != local_ver
+    available = _parse_version(remote_ver) > _parse_version(local_ver)
     _log(f"Version check: local={local_ver}, remote={remote_ver}, update={'YES' if available else 'no'}")
 
     return {"available": available, "local": local_ver, "remote": remote_ver}
@@ -306,9 +344,12 @@ def check_for_update(config: dict = None) -> dict:
 
 def do_update(force: bool = False) -> bool:
     """
-    Full update flow: check -> backup -> download -> apply -> restart.
+    Full update flow: migrate config -> check -> backup -> download -> apply -> restart.
     Returns True if update was applied successfully.
     """
+    # Migrate old raw URLs to Releases URLs (one-time, idempotent)
+    _migrate_config()
+
     config = _load_config()
 
     if not config.get("enabled", True):

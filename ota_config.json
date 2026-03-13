@@ -1,6 +1,6 @@
 {
-    "version_url": "https://raw.githubusercontent.com/mylesdedwards/OTPi/master/version.txt",
-    "bundle_url": "https://raw.githubusercontent.com/mylesdedwards/OTPi/master/otpi_update.tar.gz",
+    "version_url": "https://github.com/mylesdedwards/OTPi/releases/latest/download/version.txt",
+    "bundle_url": "https://github.com/mylesdedwards/OTPi/releases/latest/download/otpi_update.tar.gz",
     "service_name": "otpi.service",
     "max_backups": 3,
     "enabled": true

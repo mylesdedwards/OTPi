@@ -95,6 +95,11 @@ class OledUI:
         self._wifi_connected = False
         self._wifi_ip = ""
 
+        # Version display (alternates with WiFi/IP on info screen)
+        self._version = self._read_version()
+        self._info_toggle = 0  # 0 = WiFi/IP, 1 = version
+        self._info_toggle_time = time.perf_counter()
+
         print(f"[UI] Initialized on screen {self.screen}")
         print(f"[UI] Loaded settings: hue={self.hue:.3f}, brightness={self.user_pct}%, lang={self._lang_codes[self._lang_idx]}")
 
@@ -103,6 +108,15 @@ class OledUI:
         self._wifi_connected = connected
         self._wifi_ssid = ssid
         self._wifi_ip = ip
+
+    def _read_version(self) -> str:
+        """Read version from version.txt."""
+        try:
+            from pathlib import Path
+            vf = Path(__file__).resolve().parent / "version.txt"
+            return "v" + vf.read_text(encoding="utf-8").strip()
+        except Exception:
+            return ""
 
     def _load_settings(self) -> dict:
         """Load user settings from JSON file"""
@@ -420,14 +434,21 @@ class OledUI:
                     draw.text((0, 14), f"{t('time')} : {secs_left:2d}s", fill=1)
                     draw.text((0, 25), f"{t('hue')}  : {int(self.hue*360):3d}\xb0", fill=1)
                     draw.text((0, 37), f"{t('bright')}: {self.user_pct:3d}%", fill=1)
-                    # WiFi status line
-                    if self._wifi_connected and self._wifi_ip:
-                        wifi_txt = self._wifi_ip
+                    # Bottom line: alternate between WiFi/IP and version every 4 seconds
+                    now = time.perf_counter()
+                    if now - self._info_toggle_time >= 4.0:
+                        self._info_toggle = 1 - self._info_toggle
+                        self._info_toggle_time = now
+
+                    if self._info_toggle == 1 and self._version:
+                        bottom_txt = self._version
+                    elif self._wifi_connected and self._wifi_ip:
+                        bottom_txt = self._wifi_ip
                     elif self._wifi_connected:
-                        wifi_txt = "WiFi: OK"
+                        bottom_txt = "WiFi: OK"
                     else:
-                        wifi_txt = "WiFi: --"
-                    draw.text((0, 52), wifi_txt, fill=1)
+                        bottom_txt = "WiFi: --"
+                    draw.text((0, 52), bottom_txt, fill=1)
 
                 elif self.screen == 1:
                     draw.text((0, 0), t("color_title"), fill=1)

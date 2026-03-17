@@ -470,12 +470,13 @@ class WifiWatchdog:
     """
     Background thread that:
       - Checks WiFi status every CHECK_INTERVAL seconds
-      - Reconnects if connection drops
+      - Reconnects if connection drops (escalates after repeated failures)
       - Re-syncs NTP every NTP_INTERVAL seconds
       - Exposes status for the OLED info screen
     """
     CHECK_INTERVAL = 30       # seconds between WiFi checks
     NTP_INTERVAL = 30 * 60    # 30 minutes between NTP syncs
+    FULL_RECONNECT_AFTER = 3  # after this many failed light reconnects, do full connect
 
     def __init__(self):
         self.connected = False
@@ -484,6 +485,7 @@ class WifiWatchdog:
         self._thread = None
         self._stop = False
         self._last_ntp = time.time()  # assume we just synced at boot
+        self._fail_count = 0
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -508,14 +510,34 @@ class WifiWatchdog:
             self._check_status()
 
             if not self.connected:
-                debug_print("WiFi watchdog: connection lost, attempting reconnect...")
-                if reconnect_wifi():
-                    self._check_status()
-                    if self.connected:
-                        # Successful reconnect — resync NTP immediately
-                        debug_print("WiFi watchdog: reconnected, syncing NTP...")
-                        get_ntp_time()
-                        self._last_ntp = time.time()
+                self._fail_count += 1
+                debug_print(f"WiFi watchdog: connection lost (attempt {self._fail_count})...")
+
+                if self._fail_count >= self.FULL_RECONNECT_AFTER:
+                    # Escalate: full connect with stored credentials
+                    debug_print("WiFi watchdog: escalating to full connect_wifi()...")
+                    ssid, pwd, country, _ = read_wifi_config()
+                    if ssid and pwd:
+                        if connect_wifi(ssid, pwd, country=country):
+                            self._check_status()
+                            if self.connected:
+                                debug_print("WiFi watchdog: full reconnect succeeded")
+                                self._fail_count = 0
+                                get_ntp_time()
+                                self._last_ntp = time.time()
+                    else:
+                        debug_print("WiFi watchdog: no saved credentials for full reconnect")
+                else:
+                    # Light reconnect
+                    if reconnect_wifi():
+                        self._check_status()
+                        if self.connected:
+                            debug_print("WiFi watchdog: reconnected, syncing NTP...")
+                            self._fail_count = 0
+                            get_ntp_time()
+                            self._last_ntp = time.time()
+            else:
+                self._fail_count = 0
 
             # Periodic NTP resync
             if self.connected and (time.time() - self._last_ntp) >= self.NTP_INTERVAL:

@@ -291,16 +291,60 @@ def get_wifi_status(iface: str = "wlan0") -> dict:
 
 def reconnect_wifi(iface: str = "wlan0", timeout: int = 30) -> bool:
     """
-    Try to bring WiFi back up using the saved config.
-    Much lighter than the full connect_wifi() — just nudges NM or wpa_supplicant.
+    Try to bring WiFi back up, escalating through progressively more
+    aggressive methods if gentle nudges don't work.
     """
     debug_print("Attempting WiFi reconnect...")
+    import time as _t
+
     try:
         if service_exists("NetworkManager"):
-            # Nudge NM to reconnect the last-known connection
+            # Step 1: Gentle nudge — ask NM to reconnect
             sh(["nmcli", "dev", "set", iface, "managed", "yes"])
             sh(["nmcli", "radio", "wifi", "on"])
             sh(["nmcli", "dev", "connect", iface])
+
+            start = _t.time()
+            while _t.time() - start < 15:
+                if _wifi_ready_check(iface):
+                    debug_print("WiFi reconnected (gentle nudge)")
+                    return True
+                _t.sleep(2.0)
+
+            # Step 2: Force disconnect then reconnect with saved credentials
+            debug_print("Gentle nudge failed, trying full reconnect with credentials...")
+            sh(["nmcli", "dev", "disconnect", iface])
+            _t.sleep(1.0)
+
+            # Find the saved connection name
+            result = sh(["nmcli", "-t", "-f", "NAME,TYPE", "con", "show"])
+            wifi_cons = [line.split(":")[0] for line in result.stdout.splitlines()
+                         if "wireless" in line.lower() or "wifi" in line.lower()]
+
+            if wifi_cons:
+                for con_name in wifi_cons:
+                    sh(["nmcli", "con", "up", con_name, "ifname", iface])
+                    start = _t.time()
+                    while _t.time() - start < 15:
+                        if _wifi_ready_check(iface):
+                            debug_print(f"WiFi reconnected via saved profile '{con_name}'")
+                            return True
+                        _t.sleep(2.0)
+
+            # Step 3: Nuclear option — restart NetworkManager entirely
+            debug_print("Saved profile failed, restarting NetworkManager...")
+            sh(["systemctl", "restart", "NetworkManager"])
+            _t.sleep(3.0)
+            sh(["nmcli", "dev", "set", iface, "managed", "yes"])
+            sh(["nmcli", "radio", "wifi", "on"])
+
+            start = _t.time()
+            while _t.time() - start < 20:
+                if _wifi_ready_check(iface):
+                    debug_print("WiFi reconnected after NM restart")
+                    return True
+                _t.sleep(2.0)
+
         else:
             sh(["ip", "link", "set", iface, "up"])
             for unit in detect_wpa_units():
@@ -308,15 +352,14 @@ def reconnect_wifi(iface: str = "wlan0", timeout: int = 30) -> bool:
             if service_exists("dhcpcd"):
                 sh(["systemctl", "restart", "dhcpcd"])
 
-        # Wait for connectivity
-        import time as _t
-        start = _t.time()
-        while _t.time() - start < timeout:
-            if _wifi_ready_check(iface):
-                debug_print("WiFi reconnected successfully")
-                return True
-            _t.sleep(2.0)
+            start = _t.time()
+            while _t.time() - start < timeout:
+                if _wifi_ready_check(iface):
+                    debug_print("WiFi reconnected successfully")
+                    return True
+                _t.sleep(2.0)
+
     except Exception as e:
         debug_print(f"WiFi reconnect error: {e}")
-    debug_print("WiFi reconnect failed")
+    debug_print("WiFi reconnect failed (all methods exhausted)")
     return False

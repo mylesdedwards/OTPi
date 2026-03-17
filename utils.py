@@ -190,8 +190,8 @@ def connect_wifi(ssid: str, password: str, iface: str = "wlan0",
         return False
 
 def get_ntp_time(server: str = "pool.ntp.org", timeout: int = 10) -> None:
-    """Synchronize time via NTP with timeout and better error handling"""
-    debug_print("Synchronizing time via NTP...")
+    """Synchronize time via NTP with timeout, falling back to HTTP time if NTP is blocked."""
+    debug_print("Synchronizing time...")
     
     try:
         # Method 1: Try ntpdate with timeout
@@ -199,7 +199,7 @@ def get_ntp_time(server: str = "pool.ntp.org", timeout: int = 10) -> None:
             debug_print(f"Using ntpdate with server {server}")
             result = sh(["timeout", str(timeout), "ntpdate", "-u", server])
             if result.returncode == 0:
-                debug_print("NTP sync successful via ntpdate")
+                debug_print("Time sync successful via ntpdate")
                 return
             else:
                 debug_print(f"ntpdate failed (exit {result.returncode}): {result.stderr}")
@@ -208,20 +208,66 @@ def get_ntp_time(server: str = "pool.ntp.org", timeout: int = 10) -> None:
         debug_print("Trying systemd-timesyncd...")
         sh(["timedatectl", "set-ntp", "true"])
         
-        # Wait briefly for sync, but don't block forever
-        for i in range(5):  # Wait max 5 seconds
+        for i in range(5):
             result = sh(["timedatectl", "show", "--property=NTPSynchronized"])
             if "NTPSynchronized=yes" in result.stdout:
-                debug_print("NTP sync successful via systemd-timesyncd")
+                debug_print("Time sync successful via systemd-timesyncd")
                 return
             time.sleep(1)
         
-        debug_print("NTP sync attempt completed (may not be synchronized)")
+        debug_print("NTP methods failed, trying HTTP time fallback...")
+        
+        # Method 3: HTTP header fallback (works when NTP port 123 is blocked)
+        if _sync_time_http():
+            debug_print("Time sync successful via HTTP headers")
+            return
+        
+        debug_print("All time sync methods failed")
         
     except Exception as e:
-        debug_print(f"NTP sync error: {e}")
+        debug_print(f"Time sync error: {e}")
     
-    debug_print("Continuing without NTP sync")
+    debug_print("Continuing without time sync")
+
+
+def _sync_time_http() -> bool:
+    """
+    Fallback time sync using HTTP Date headers.
+    Works on networks that block NTP (port 123) but allow HTTPS (port 443).
+    Accurate to within ~1 second, which is plenty for TOTP.
+    """
+    urls = [
+        "https://www.google.com",
+        "https://www.cloudflare.com",
+        "https://www.apple.com",
+    ]
+    
+    for url in urls:
+        try:
+            from urllib.request import urlopen, Request
+            req = Request(url, method="HEAD")
+            req.add_header("User-Agent", "OTPi/1.0")
+            with urlopen(req, timeout=5) as resp:
+                date_str = resp.headers.get("Date")
+                if not date_str:
+                    continue
+                
+                # Parse HTTP date: "Thu, 13 Mar 2026 12:34:56 GMT"
+                from email.utils import parsedate_to_datetime
+                http_time = parsedate_to_datetime(date_str)
+                
+                # Set system clock
+                time_str = http_time.strftime("%Y-%m-%d %H:%M:%S")
+                result = sh(["sudo", "date", "-u", "-s", time_str])
+                if result.returncode == 0:
+                    debug_print(f"Set time from {url}: {time_str} UTC")
+                    return True
+                    
+        except Exception as e:
+            debug_print(f"HTTP time from {url} failed: {e}")
+            continue
+    
+    return False
 
 
 def get_wifi_status(iface: str = "wlan0") -> dict:

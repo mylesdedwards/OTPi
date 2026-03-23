@@ -34,15 +34,17 @@ class ResetAction:
     WIFI = "wifi"
     QR   = "qr"
     BOTH = "both"
+    SYNC_TIME = "sync_time"
+    WIFI_TOGGLE = "wifi_toggle"
 
 class OledUI:
     """
-    6-screen UI:
-      0 Basic (OTP, hue°, %)
-      1 Color (rotate -> hue)
-      2 Brightness (rotate 0..100%, capped to 80% actual)
-      3 Language (rotate to pick, press to confirm)
-      4 Reset menu (Next, Reset Wi-Fi, Reset QR, Reset Both)
+    5-screen UI:
+      0 Info (OTP, time, hue°, %)
+      1 Settings (Color + Brightness: scroll to select, click to edit, click to exit)
+      2 Language (rotate to pick, press to confirm)
+      3 Debug (IP, SSID, UTC time, version)
+      4 Options menu (Next, Sync Time, Reset Wi-Fi, Reset QR, Reset Both)
       5 Confirm screen (PRESS = confirm; ROTATE = cancel/back)
     """
     def __init__(self, oled, initial_hue: float, user_brightness_pct: int):
@@ -55,6 +57,10 @@ class OledUI:
         saved_settings = self._load_settings()
         self.hue = float(saved_settings.get('hue', initial_hue)) % 1.0
         self.user_pct = int(max(0, min(100, saved_settings.get('brightness', user_brightness_pct))))
+
+        # Settings screen state (combined color + brightness)
+        self._settings_sel = 0      # 0=Hue, 1=Brightness, 2=Next
+        self._settings_editing = False  # True when adjusting a value
 
         # Language state – index into lang.LANGUAGES
         self._lang_codes = [code for code, _, _ in lang.LANGUAGES]
@@ -95,10 +101,11 @@ class OledUI:
         self._wifi_connected = False
         self._wifi_ip = ""
 
-        # Version display (alternates with WiFi/IP on info screen)
+        # Version display
         self._version = self._read_version()
-        self._info_toggle = 0  # 0 = WiFi/IP, 1 = version
-        self._info_toggle_time = time.perf_counter()
+
+        # Offline mode flag
+        self._offline = bool(saved_settings.get("offline_mode", False))
 
         print(f"[UI] Initialized on screen {self.screen}")
         print(f"[UI] Loaded settings: hue={self.hue:.3f}, brightness={self.user_pct}%, lang={self._lang_codes[self._lang_idx]}")
@@ -265,43 +272,74 @@ class OledUI:
         if self.screen == 0:  # Basic/Info
             if pressed_edge and can_change_screen:
                 self.screen = 1
+                self._settings_sel = 0
+                self._settings_editing = False
                 self._last_screen_change = now
 
-        elif self.screen == 1:  # Color
-            if step:
-                # Reverse direction: positive step = clockwise = increase hue
-                self.hue = (self.hue + step * 0.01) % 1.0
-            if pressed_edge and can_change_screen:
-                self.screen = 2
-                self._last_screen_change = now
+        elif self.screen == 1:  # Settings (Color + Brightness)
+            if self._settings_editing:
+                # In edit mode: rotate changes the value, press exits edit
+                if step:
+                    if self._settings_sel == 1:  # Hue
+                        self.hue = (self.hue + step * 0.01) % 1.0
+                    elif self._settings_sel == 2:  # Brightness
+                        self.user_pct = int(max(0, min(100, self.user_pct + step)))
+                if pressed_edge and can_change_screen:
+                    self._settings_editing = False
+                    self._last_screen_change = now
+            else:
+                # In select mode: rotate picks item, press enters edit or goes next
+                if step:
+                    self._settings_sel = (self._settings_sel + step) % 3
+                if pressed_edge and can_change_screen:
+                    if self._settings_sel == 0:  # "Next" selected
+                        self.screen = 2
+                    else:
+                        self._settings_editing = True
+                    self._last_screen_change = now
 
-        elif self.screen == 2:  # Brightness
+        elif self.screen == 2:  # Language
             if step:
-                # Reverse direction: positive step = clockwise = increase brightness
-                self.user_pct = int(max(0, min(100, self.user_pct + step)))
+                self._lang_idx = (self._lang_idx + step) % len(self._lang_codes)
+                lang.set_language(self._lang_codes[self._lang_idx])
             if pressed_edge and can_change_screen:
                 self.screen = 3
                 self._last_screen_change = now
 
-        elif self.screen == 3:  # Language
-            if step:
-                self._lang_idx = (self._lang_idx + step) % len(self._lang_codes)
-                # Apply immediately so the screen redraws in the new language
-                lang.set_language(self._lang_codes[self._lang_idx])
+        elif self.screen == 3:  # Debug
             if pressed_edge and can_change_screen:
                 self.screen = 4
+                self.selection = 0
                 self._last_screen_change = now
 
-        elif self.screen == 4:  # Reset menu
+        elif self.screen == 4:  # Options menu
+            # Build dynamic menu based on mode
+            if self._offline:
+                # Offline: Next, Turn WiFi On, Sync Time, Reset WiFi, Reset QR, Reset Both
+                menu_actions = [None, ResetAction.WIFI_TOGGLE, ResetAction.SYNC_TIME,
+                                ResetAction.WIFI, ResetAction.QR, ResetAction.BOTH]
+            else:
+                # Online: Next, Turn WiFi Off, Reset WiFi, Reset QR, Reset Both
+                menu_actions = [None, ResetAction.WIFI_TOGGLE,
+                                ResetAction.WIFI, ResetAction.QR, ResetAction.BOTH]
+
+            menu_count = len(menu_actions)
             if step:
-                # Reverse direction: positive step = clockwise = next item (down the list)
-                self.selection = (self.selection + step) % 4
+                self.selection = (self.selection + step) % menu_count
             if pressed_edge and can_change_screen:
-                if self.selection == 0:
+                action_val = menu_actions[self.selection]
+                if action_val is None:
+                    self.screen = 0  # Next/back
+                elif action_val == ResetAction.WIFI_TOGGLE:
+                    reset_action = ResetAction.WIFI_TOGGLE
+                    self._offline = not self._offline
                     self.screen = 0
-                else:
+                elif action_val == ResetAction.SYNC_TIME:
+                    reset_action = ResetAction.SYNC_TIME
+                    self.screen = 0
+                elif action_val in (ResetAction.WIFI, ResetAction.QR, ResetAction.BOTH):
                     self.screen = 5
-                    self.confirm_for = [ResetAction.WIFI, ResetAction.QR, ResetAction.BOTH][self.selection-1]
+                    self.confirm_for = action_val
                 self._last_screen_change = now
 
         elif self.screen == 5:  # Confirm
@@ -314,7 +352,6 @@ class OledUI:
                 if self.confirm_for:
                     reset_action = self.confirm_for
                     print(f"[UI] Reset action confirmed: {reset_action}")
-                # after signaling action, app will restart; reset state here for safety
                 self.screen = 0
                 self.confirm_for = None
                 self._last_screen_change = now
@@ -413,9 +450,11 @@ class OledUI:
 
         now = time.time()
 
-        # Force draw on screen changes or info screen updates
+        # Force draw on screen changes or live screens
         should_draw = (self._force_draw_next or
                       self.screen == 0 or  # Always update info screen
+                      self.screen == 1 or  # Always update settings screen (live edits)
+                      self.screen == 3 or  # Always update debug screen (live UTC)
                       now - self._last_draw_ts > 0.05)  # 50ms max for other screens
 
         if not should_draw:
@@ -434,34 +473,33 @@ class OledUI:
                     draw.text((0, 14), f"{t('time')} : {secs_left:2d}s", fill=1)
                     draw.text((0, 25), f"{t('hue')}  : {int(self.hue*360):3d}\xb0", fill=1)
                     draw.text((0, 37), f"{t('bright')}: {self.user_pct:3d}%", fill=1)
-                    # Bottom line: alternate between WiFi/IP and version every 4 seconds
-                    now = time.perf_counter()
-                    if now - self._info_toggle_time >= 4.0:
-                        self._info_toggle = 1 - self._info_toggle
-                        self._info_toggle_time = now
-
-                    if self._info_toggle == 1 and self._version:
-                        bottom_txt = self._version
-                    elif self._wifi_connected and self._wifi_ip:
-                        bottom_txt = self._wifi_ip
-                    elif self._wifi_connected:
-                        bottom_txt = "WiFi: OK"
-                    else:
-                        bottom_txt = "WiFi: --"
-                    draw.text((0, 52), bottom_txt, fill=1)
+                    draw.text((0, 52), t("press_next"), fill=1)
 
                 elif self.screen == 1:
-                    draw.text((0, 0), t("color_title"), fill=1)
-                    draw.text((0, 14), f"{t('hue')}: {int(self.hue*360):3d}\xb0", fill=1)
-                    draw.text((0, 28), t("rotate_color"), fill=1)
-                    draw.text((0, 42), t("press_next"), fill=1)
+                    # Settings screen: Next + Color + Brightness
+                    draw.text((0, 0), "-- Settings --", fill=1)
+
+                    items = [
+                        (t("next_screen"), self._settings_sel == 0),
+                        (f"{t('hue')}: {int(self.hue*360):3d}\xb0", self._settings_sel == 1),
+                        (f"{t('bright')}: {self.user_pct:3d}%", self._settings_sel == 2),
+                    ]
+
+                    y = 16
+                    for text, selected in items:
+                        if selected and self._settings_editing:
+                            prefix = "*"
+                        elif selected:
+                            prefix = ">"
+                        else:
+                            prefix = " "
+                        draw.text((0, y), f"{prefix} {text}", fill=1)
+                        y += 14
+
+                    if self._settings_editing:
+                        draw.text((0, 54), "Rotate:Adjust Click:Done", fill=1)
 
                 elif self.screen == 2:
-                    draw.text((0, 0), t("bright_title"), fill=1)
-                    draw.text((0, 14), f"{t('level')}: {self.user_pct:3d}%", fill=1)
-                    draw.text((0, 28), t("press_next"), fill=1)
-
-                elif self.screen == 3:
                     # Language picker
                     code = self._lang_codes[self._lang_idx]
                     _, native, english = lang.LANGUAGES[self._lang_idx]
@@ -471,21 +509,46 @@ class OledUI:
                     draw.text((0, 42), t("rotate_lang"), fill=1)
                     draw.text((0, 54), t("press_next"), fill=1)
 
+                elif self.screen == 3:
+                    # Debug screen - device info
+                    import datetime
+                    utc_now = datetime.datetime.utcnow().strftime("%H:%M:%S")
+
+                    draw.text((0, 0), "-- Device Info --", fill=1)
+
+                    if self._offline:
+                        draw.text((0, 14), "Mode: Offline", fill=1)
+                    elif self._wifi_connected and self._wifi_ip:
+                        draw.text((0, 14), f"IP: {self._wifi_ip}", fill=1)
+                    elif self._wifi_connected:
+                        draw.text((0, 14), "WiFi: Connected", fill=1)
+                    else:
+                        draw.text((0, 14), "WiFi: Disconnected", fill=1)
+
+                    ssid_txt = self._wifi_ssid if self._wifi_ssid else "--"
+                    if len(ssid_txt) > 16:
+                        ssid_txt = ssid_txt[:15] + "\u2026"
+                    draw.text((0, 26), f"Net: {ssid_txt}", fill=1)
+
+                    draw.text((0, 38), f"UTC: {utc_now}", fill=1)
+
+                    draw.text((0, 50), self._version if self._version else "v?.?.?", fill=1)
+
                 elif self.screen == 4:
-                    opts = [t("next_screen"), t("reset_wifi"), t("reset_qr"), t("reset_both")]
-                    draw.text((0, 0), t("reset_title"), fill=1)
-                    y = 14
+                    wifi_label = "Turn WiFi On" if self._offline else "Turn WiFi Off"
+                    if self._offline:
+                        opts = [t("next_screen"), wifi_label, "Sync Time", t("reset_wifi"), t("reset_qr"), t("reset_both")]
+                    else:
+                        opts = [t("next_screen"), wifi_label, t("reset_wifi"), t("reset_qr"), t("reset_both")]
+                    draw.text((0, 0), "-- Options --", fill=1)
+                    y = 12
                     for i, s in enumerate(opts):
                         prefix = ">" if i == self.selection else " "
                         text = f"{prefix} {s}"
-                        if len(text) > 20:  # Truncate if too long
+                        if len(text) > 20:
                             text = text[:19] + "..."
                         draw.text((0, y), text, fill=1)
-                        y += 10
-
-                    # Scrolling bottom text
-                    scroll_text = self._get_scrolling_text(t("scroll_hint"))
-                    draw.text((0, 54), scroll_text, fill=1)
+                        y += 9
 
                 elif self.screen == 5:
                     label = {
@@ -543,6 +606,17 @@ def perform_reset(which: str, oled=None, led_strip=None):
                     print(f"[RESET] Deleted {WIFI_CONFIG}")
             except Exception as e:
                 print(f"[RESET] Failed to delete wifi config: {e}")
+
+            # Also clear NetworkManager saved connections
+            try:
+                import subprocess, glob
+                nm_conns = glob.glob("/etc/NetworkManager/system-connections/*")
+                for f in nm_conns:
+                    subprocess.run(["sudo", "rm", "-f", f], capture_output=True)
+                if nm_conns:
+                    print(f"[RESET] Cleared {len(nm_conns)} NetworkManager connection(s)")
+            except Exception as e:
+                print(f"[RESET] Failed to clear NM connections: {e}")
 
         if which in (ResetAction.QR, ResetAction.BOTH):
             try:

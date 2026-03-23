@@ -465,6 +465,78 @@ except Exception:
 
 # ================= helpers =================
 
+def perform_time_sync(oled=None):
+    """
+    Temporarily start an AP, run a time sync web server so the user
+    can sync time from their phone, then shut down the AP and return.
+    Does NOT reboot — just returns to normal operation.
+    """
+    from start_ap_mode import start_ap_mode, stop_ap_mode
+
+    debug_print("Starting time sync AP...")
+
+    # Show instructions on OLED
+    if oled:
+        try:
+            from luma.core.render import canvas
+            with canvas(oled) as draw:
+                draw.text((0, 0), "TIME SYNC", fill=1)
+                draw.text((0, 14), "Connect phone to", fill=1)
+                # Get the AP SSID
+                try:
+                    from start_ap_mode import get_unique_ssid
+                    ap_ssid = get_unique_ssid()
+                except Exception:
+                    ap_ssid = "OTPi-Setup"
+                draw.text((0, 28), f"WiFi: {ap_ssid}", fill=1)
+                draw.text((0, 42), "Then open browser", fill=1)
+                draw.text((0, 54), "to 192.168.4.1", fill=1)
+        except Exception as e:
+            debug_print(f"OLED time sync message failed: {e}")
+
+    try:
+        # Start AP mode
+        start_ap_mode()
+        time.sleep(1)
+
+        # Run minimal time sync server (2 min timeout)
+        from wifi_web import run_time_sync_server
+        synced = run_time_sync_server(timeout=120)
+
+        if synced:
+            debug_print("Time sync successful via phone")
+            if oled:
+                try:
+                    from luma.core.render import canvas
+                    with canvas(oled) as draw:
+                        draw.text((0, 0), "TIME SYNCED!", fill=1)
+                        draw.text((0, 16), "Clock updated", fill=1)
+                        draw.text((0, 32), "Returning to", fill=1)
+                        draw.text((0, 48), "normal mode...", fill=1)
+                    time.sleep(2)
+                except Exception:
+                    pass
+        else:
+            debug_print("Time sync timed out")
+            if oled:
+                try:
+                    from luma.core.render import canvas
+                    with canvas(oled) as draw:
+                        draw.text((0, 0), "SYNC TIMEOUT", fill=1)
+                        draw.text((0, 16), "No phone connected", fill=1)
+                        draw.text((0, 32), "Returning to", fill=1)
+                        draw.text((0, 48), "normal mode...", fill=1)
+                    time.sleep(2)
+                except Exception:
+                    pass
+
+    except Exception as e:
+        debug_print(f"Time sync error: {e}")
+    finally:
+        stop_ap_mode()
+        debug_print("Time sync AP stopped, back to normal")
+
+
 # ---------------- WiFi watchdog (keeps connection alive + periodic NTP) ----
 class WifiWatchdog:
     """
@@ -610,15 +682,34 @@ def _ip_addrs() -> list[str]:
     except Exception:
         return []
 
+def _is_offline_mode() -> bool:
+    """Check if offline mode is enabled in user_settings.json."""
+    settings_file = PROJECT_DIR / "user_settings.json"
+    try:
+        if settings_file.exists():
+            import json
+            with open(settings_file) as f:
+                settings = json.load(f)
+            return bool(settings.get("offline_mode", False))
+    except Exception:
+        pass
+    return False
+
+
 def need_setup(ssid: Optional[str], pwd: Optional[str], secret_present: bool,
                country: str = "US") -> Tuple[bool, bool, bool]:
     """
     Returns (need_any, need_wifi, need_qr)
-    - need_wifi if no creds or connection fails
+    - need_wifi if no creds or connection fails (skipped in offline mode)
     - need_qr   if no secret text file
     """
     need_wifi = False
     need_qr   = not secret_present
+
+    # In offline mode, skip WiFi entirely
+    if _is_offline_mode():
+        debug_print("Offline mode enabled — skipping WiFi connection")
+        return need_qr, False, need_qr
 
     if ssid and pwd:
         debug_print(f"(NM) Connecting to SSID: {ssid} (country={country})")
@@ -858,6 +949,28 @@ def main():
                 # Run enhanced setup with progress tracking
                 run_setup_with_progress_tracking(need_wifi, need_qr, oled_manager)
 
+                # If offline mode, run time sync immediately (AP is still active)
+                if _is_offline_mode():
+                    debug_print("Offline setup complete — starting time sync...")
+                    if oled_device:
+                        try:
+                            from luma.core.render import canvas
+                            with canvas(oled_device) as draw:
+                                draw.text((0, 0), "SETUP SAVED!", fill=1)
+                                draw.text((0, 16), "Now sync time:", fill=1)
+                                draw.text((0, 32), "Open browser to", fill=1)
+                                draw.text((0, 48), "192.168.4.1", fill=1)
+                        except Exception:
+                            pass
+
+                    # Run time sync on the already-active AP
+                    from wifi_web import run_time_sync_server
+                    synced = run_time_sync_server(timeout=120)
+                    if synced:
+                        debug_print("Time synced during offline setup")
+                    else:
+                        debug_print("Time sync skipped/timed out during offline setup")
+
                 # Show completion message
                 if oled_device:
                     try:
@@ -926,9 +1039,14 @@ def main():
                 return  # not reached
 
         # 3) All set: we have Wi-Fi and an OTP secret
-        debug_print("Synchronizing time via NTP…")
-        get_ntp_time()
-        debug_print("NTP sync completed")
+        offline = _is_offline_mode()
+
+        if offline:
+            debug_print("Offline mode — skipping NTP sync")
+        else:
+            debug_print("Synchronizing time via NTP…")
+            get_ntp_time()
+            debug_print("NTP sync completed")
 
         # Initialize OLED for normal operation
         debug_print("Initializing OLED for splash screen...")
@@ -938,8 +1056,11 @@ def main():
             try:
                 from luma.core.render import canvas
                 with canvas(oled_device) as draw:
-                    draw.text((0, 0),  t("wifi_ok"), fill=1)
-                    draw.text((0, 12), t("time_ok"), fill=1)
+                    if offline:
+                        draw.text((0, 0),  "Offline Mode", fill=1)
+                    else:
+                        draw.text((0, 0),  t("wifi_ok"), fill=1)
+                        draw.text((0, 12), t("time_ok"), fill=1)
                     draw.text((0, 24), t("starting"), fill=1)
                 debug_print("Splash screen displayed")
             except Exception as e:
@@ -967,9 +1088,13 @@ def main():
         # 4) Run the LED/OLED TOTP display with user settings
         print("→ Launching TOTP/LED display (Ctrl-C to quit)\n")
 
-        # Start WiFi watchdog (monitors connectivity + periodic NTP resync)
-        watchdog = WifiWatchdog()
-        watchdog.start()
+        # Start WiFi watchdog only if online
+        watchdog = None
+        if not offline:
+            watchdog = WifiWatchdog()
+            watchdog.start()
+        else:
+            debug_print("Offline mode — WiFi watchdog disabled")
 
         debug_print("Calling run_totp_display...")
         user_settings = load_user_settings()
@@ -979,7 +1104,8 @@ def main():
         except KeyboardInterrupt:
             print("\n→ Exiting on user interrupt")
         finally:
-            watchdog.stop()
+            if watchdog:
+                watchdog.stop()
             try:
                 if encoder:
                     encoder.close()

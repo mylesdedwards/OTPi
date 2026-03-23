@@ -371,6 +371,56 @@ def run_totp_display(secret: str, settings: dict, oled, encoder, wifi_watchdog=N
                     pass
                 
             # CRITICAL FIX: Execute reset with proper LED cleanup
+            if action == ResetAction.WIFI_TOGGLE:
+                print("[DEBUG] WiFi toggle requested")
+                # Save the new offline mode preference
+                from wifi_web import save_offline_mode, is_offline_mode
+                new_offline = not is_offline_mode()
+                save_offline_mode(new_offline)
+                print(f"[DEBUG] Offline mode set to {new_offline}, rebooting...")
+
+                # Show message on OLED
+                if oled:
+                    try:
+                        from luma.core.render import canvas
+                        with canvas(oled) as draw:
+                            if new_offline:
+                                draw.text((0, 0), "TURNING OFF WIFI", fill=1)
+                                draw.text((0, 16), "Switching to", fill=1)
+                                draw.text((0, 32), "offline mode...", fill=1)
+                            else:
+                                draw.text((0, 0), "TURNING ON WIFI", fill=1)
+                                draw.text((0, 16), "Connecting to", fill=1)
+                                draw.text((0, 32), "saved network...", fill=1)
+                    except Exception:
+                        pass
+
+                # Blank LEDs
+                if strip is not None:
+                    try:
+                        strip.fill((0, 0, 0))
+                        strip.show()
+                    except Exception:
+                        pass
+
+                import time as _t; _t.sleep(2)
+                import os; os.system("sudo reboot")
+                return
+
+            if action == ResetAction.SYNC_TIME:
+                print("[DEBUG] Starting time sync...")
+                # Blank LEDs during sync
+                if strip is not None:
+                    try:
+                        strip.fill((0, 0, 0))
+                        strip.show()
+                    except Exception:
+                        pass
+                from main import perform_time_sync
+                perform_time_sync(oled)
+                # After sync, continue normal operation
+                continue
+
             if action in (ResetAction.WIFI, ResetAction.QR, ResetAction.BOTH):
                 print(f"[DEBUG] Executing reset action: {action}")
                 # Pass the LED strip to reset function for proper cleanup

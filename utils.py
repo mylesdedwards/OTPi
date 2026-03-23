@@ -189,84 +189,129 @@ def connect_wifi(ssid: str, password: str, iface: str = "wlan0",
         debug_print(f"connect_wifi error: {e}")
         return False
 
-def get_ntp_time(server: str = "pool.ntp.org", timeout: int = 10) -> None:
-    """Synchronize time via NTP with timeout, falling back to HTTP time if NTP is blocked."""
-    debug_print("Synchronizing time...")
-    
+def _time_looks_valid() -> bool:
+    """Check if the system clock looks reasonable (year 2025+ and not far future)."""
+    import datetime
+    now = datetime.datetime.utcnow()
+    return 2025 <= now.year <= 2035
+
+
+def _get_http_time(url: str) -> 'Optional[datetime.datetime]':
+    """Fetch the Date header from a URL and return it as a datetime, or None."""
     try:
-        # Method 1: Try ntpdate with timeout
-        if sh(["which", "ntpdate"]).returncode == 0:
-            debug_print(f"Using ntpdate with server {server}")
-            result = sh(["timeout", str(timeout), "ntpdate", "-u", server])
-            if result.returncode == 0:
-                debug_print("Time sync successful via ntpdate")
-                return
-            else:
-                debug_print(f"ntpdate failed (exit {result.returncode}): {result.stderr}")
-        
-        # Method 2: Try systemd-timesyncd
-        debug_print("Trying systemd-timesyncd...")
-        sh(["timedatectl", "set-ntp", "true"])
-        
-        for i in range(5):
-            result = sh(["timedatectl", "show", "--property=NTPSynchronized"])
-            if "NTPSynchronized=yes" in result.stdout:
-                debug_print("Time sync successful via systemd-timesyncd")
-                return
-            time.sleep(1)
-        
-        debug_print("NTP methods failed, trying HTTP time fallback...")
-        
-        # Method 3: HTTP header fallback (works when NTP port 123 is blocked)
-        if _sync_time_http():
-            debug_print("Time sync successful via HTTP headers")
-            return
-        
-        debug_print("All time sync methods failed")
-        
-    except Exception as e:
-        debug_print(f"Time sync error: {e}")
-    
-    debug_print("Continuing without time sync")
+        from urllib.request import urlopen, Request
+        from email.utils import parsedate_to_datetime
+        req = Request(url, method="HEAD")
+        req.add_header("User-Agent", "OTPi/1.0")
+        with urlopen(req, timeout=5) as resp:
+            date_str = resp.headers.get("Date")
+            if date_str:
+                return parsedate_to_datetime(date_str)
+    except Exception:
+        pass
+    return None
 
 
 def _sync_time_http() -> bool:
     """
     Fallback time sync using HTTP Date headers.
-    Works on networks that block NTP (port 123) but allow HTTPS (port 443).
-    Accurate to within ~1 second, which is plenty for TOTP.
+    Fetches time from multiple sources and only sets the clock if at least
+    two sources agree within 5 seconds — prevents a corporate proxy from
+    setting the wrong time.
     """
+    import datetime
+
     urls = [
         "https://www.google.com",
         "https://www.cloudflare.com",
         "https://www.apple.com",
+        "https://www.microsoft.com",
     ]
-    
+
+    times = []
     for url in urls:
-        try:
-            from urllib.request import urlopen, Request
-            req = Request(url, method="HEAD")
-            req.add_header("User-Agent", "OTPi/1.0")
-            with urlopen(req, timeout=5) as resp:
-                date_str = resp.headers.get("Date")
-                if not date_str:
-                    continue
-                
-                # Parse HTTP date: "Thu, 13 Mar 2026 12:34:56 GMT"
-                from email.utils import parsedate_to_datetime
-                http_time = parsedate_to_datetime(date_str)
-                
-                # Set system clock
-                time_str = http_time.strftime("%Y-%m-%d %H:%M:%S")
+        t = _get_http_time(url)
+        if t is not None:
+            times.append((url, t))
+            debug_print(f"  HTTP time from {url}: {t.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        if len(times) >= 3:
+            break
+
+    if len(times) < 2:
+        debug_print("HTTP time: not enough sources responded")
+        return False
+
+    # Check that at least 2 sources agree within 5 seconds
+    for i in range(len(times)):
+        for j in range(i + 1, len(times)):
+            diff = abs((times[i][1] - times[j][1]).total_seconds())
+            if diff <= 5.0:
+                # Sources agree — use the first one
+                chosen = times[i][1]
+                time_str = chosen.strftime("%Y-%m-%d %H:%M:%S")
                 result = sh(["sudo", "date", "-u", "-s", time_str])
                 if result.returncode == 0:
-                    debug_print(f"Set time from {url}: {time_str} UTC")
+                    debug_print(f"Set time from {times[i][0]}: {time_str} UTC (confirmed by {times[j][0]}, diff={diff:.1f}s)")
                     return True
-                    
-        except Exception as e:
-            debug_print(f"HTTP time from {url} failed: {e}")
-            continue
-    
+                return False
+
+    # Sources disagree — don't trust any of them
+    diffs = []
+    for i in range(len(times)):
+        for j in range(i + 1, len(times)):
+            diffs.append(abs((times[i][1] - times[j][1]).total_seconds()))
+    debug_print(f"HTTP time: sources disagree (diffs: {diffs}) — not setting clock")
+    return False
+
+
+def get_ntp_time(server: str = "pool.ntp.org", timeout: int = 10) -> bool:
+    """
+    Synchronize system time. Tries NTP first, falls back to HTTP headers.
+    Returns True if time was successfully synced and verified.
+    """
+    debug_print("Synchronizing time...")
+
+    # If time already looks valid, still try to sync but don't panic
+    already_valid = _time_looks_valid()
+
+    try:
+        # Method 1: Try ntpdate
+        if sh(["which", "ntpdate"]).returncode == 0:
+            debug_print(f"Trying ntpdate with server {server}")
+            result = sh(["timeout", str(timeout), "ntpdate", "-u", server])
+            if result.returncode == 0 and _time_looks_valid():
+                debug_print("Time sync successful via ntpdate")
+                return True
+            else:
+                debug_print(f"ntpdate failed or time invalid after sync")
+
+        # Method 2: Try systemd-timesyncd
+        debug_print("Trying systemd-timesyncd...")
+        sh(["timedatectl", "set-ntp", "true"])
+
+        for i in range(5):
+            result = sh(["timedatectl", "show", "--property=NTPSynchronized"])
+            if "NTPSynchronized=yes" in result.stdout and _time_looks_valid():
+                debug_print("Time sync successful via systemd-timesyncd")
+                return True
+            time.sleep(1)
+
+        # Method 3: HTTP header fallback with cross-check
+        debug_print("NTP methods failed, trying HTTP time fallback...")
+        if _sync_time_http() and _time_looks_valid():
+            debug_print("Time sync successful via HTTP headers")
+            return True
+
+        debug_print("All time sync methods failed")
+
+    except Exception as e:
+        debug_print(f"Time sync error: {e}")
+
+    if _time_looks_valid():
+        debug_print("Time sync methods failed but clock looks reasonable — continuing")
+        return True
+
+    debug_print("WARNING: Clock may be wrong — TOTP codes may not match")
     return False
 
 

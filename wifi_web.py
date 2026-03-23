@@ -543,7 +543,16 @@ class _PortalHandler(BaseHTTPRequestHandler):
             msg = f"<p>{t('web_msg_both')}</p>"
             setup_form = f"""
             <form method="POST" enctype="multipart/form-data" id="setupForm">
-              {_wifi_form_block(ssid_val, country_val, language_val)}
+              <div style="margin-bottom:1rem;padding:0.8rem;border:1px solid #ccc;border-radius:6px;background:#f8f9fa;">
+                <label style="display:flex;align-items:center;gap:0.5em;cursor:pointer;">
+                  <input type="checkbox" id="offlineCheck" name="offline" value="1" style="width:1.2em;height:1.2em;">
+                  <strong>Offline Mode</strong> (no WiFi needed)
+                </label>
+              </div>
+
+              <div id="wifiSection">
+                {_wifi_form_block(ssid_val, country_val, language_val)}
+              </div>
 
               <h2>{t('web_qr_title')}</h2>
               <label>{t('web_qr_label')}</label>
@@ -555,6 +564,16 @@ class _PortalHandler(BaseHTTPRequestHandler):
             </form>
             {_wifi_js()}
             <script>
+            var offlineMode = false;
+            document.getElementById('offlineCheck').addEventListener('change', function() {{
+                offlineMode = this.checked;
+                var wifiSection = document.getElementById('wifiSection');
+                wifiSection.style.display = offlineMode ? 'none' : '';
+                // Remove/restore required on WiFi fields so browser doesn't block submit
+                var pwdField = document.getElementById('passwordInput');
+                if (pwdField) pwdField.required = !offlineMode;
+                checkFormComplete();
+            }});
             function checkFormComplete() {{
                 var ssid     = document.getElementById('ssidHidden').value.trim();
                 var password = document.getElementById('passwordInput').value.trim();
@@ -562,7 +581,7 @@ class _PortalHandler(BaseHTTPRequestHandler):
                 var btn      = document.getElementById('saveButton');
                 var status   = document.getElementById('statusText');
 
-                var ok = ssid && password && qr;
+                var ok = offlineMode ? qr : (ssid && password && qr);
                 btn.disabled = !ok;
 
                 if (ok) {{
@@ -570,8 +589,8 @@ class _PortalHandler(BaseHTTPRequestHandler):
                     status.className = "hint ok";
                 }} else {{
                     var m = [];
-                    if (!ssid)     m.push('{js_f_ssid}');
-                    if (!password) m.push('{js_f_pwd}');
+                    if (!offlineMode && !ssid)     m.push('{js_f_ssid}');
+                    if (!offlineMode && !password) m.push('{js_f_pwd}');
                     if (!qr)       m.push('{js_f_qr}');
                     status.textContent = '{js_missing}: ' + m.join(', ');
                     status.className = "hint";
@@ -644,6 +663,7 @@ class _PortalHandler(BaseHTTPRequestHandler):
         ctype = self.headers.get("Content-Type", "")
         saved_wifi = False
         saved_qr   = False
+        offline    = False
         err_msg    = None
 
         try:
@@ -652,6 +672,10 @@ class _PortalHandler(BaseHTTPRequestHandler):
                     fp=self.rfile, headers=self.headers,
                     environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": ctype},
                 )
+
+                # ── Check offline mode ──
+                offline_val = form.getfirst("offline") or ""
+                offline = offline_val == "1"
 
                 # ── QR upload ──
                 fitem = form["qr"] if "qr" in form else None
@@ -669,17 +693,29 @@ class _PortalHandler(BaseHTTPRequestHandler):
                         print(f"[DEBUG] Saved QR image '{filename}' to {SECRET_QR_PNG}")
                         saved_qr = True
 
-                # ── Wi-Fi credentials ──
+                # ── Wi-Fi credentials (skip if offline) ──
                 ssid    = (form.getfirst("ssid") or "").strip()
                 pwd     = (form.getfirst("password") or "").strip()
                 country = (form.getfirst("country") or "US").strip().upper()
                 language = (form.getfirst("language") or "en").strip().lower()
-                if ssid and pwd:
+                if ssid and pwd and not offline:
                     WIFI_CONFIG.write_text(
                         f"{ssid}\n{pwd}\n{country}\n{language}\n", encoding="utf-8",
                     )
                     print(f"[DEBUG] Saved Wi-Fi to {WIFI_CONFIG} (country={country}, lang={language})")
                     saved_wifi = True
+
+                # Save offline mode preference
+                if offline:
+                    save_offline_mode(True)
+                    # In offline mode, save language from country selector if present
+                    if language:
+                        try:
+                            import lang as _lang
+                            _lang.set_language(language)
+                        except Exception:
+                            pass
+                    saved_wifi = True  # Mark as satisfied so form succeeds
 
             else:
                 # x-www-form-urlencoded
@@ -792,3 +828,167 @@ def serve_upload(*args, **kwargs):
 
 def start_portal(*args, **kwargs):
     return run_captive_portal(*args, **kwargs)
+
+
+# ── Time Sync AP Server ───────────────────────────────────────────
+# Minimal web server that shows a page with JavaScript to send the
+# phone's current time to the Pi. Used when NTP is blocked.
+
+_TIME_SYNC_HTML = """<!doctype html>
+<html><head>
+  <meta charset="utf-8">
+  <title>OTPi Time Sync</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 2rem auto; padding: 0 1rem; text-align: center; }
+    h1 { font-size: 1.4rem; }
+    .status { font-size: 1.2rem; margin: 2rem 0; padding: 1rem; border-radius: 8px; }
+    .syncing { background: #fff3cd; color: #856404; }
+    .ok { background: #d4edda; color: #155724; }
+    .err { background: #f8d7da; color: #721c24; }
+  </style>
+</head><body>
+  <h1>OTPi Time Sync</h1>
+  <div id="status" class="status syncing">Syncing time from your device...</div>
+  <script>
+    (function() {
+      var now = new Date();
+      var utc = Math.floor(now.getTime() / 1000);
+      var iso = now.toISOString();
+      fetch('/set_time', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({epoch: utc, iso: iso})
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.ok) {
+          document.getElementById('status').className = 'status ok';
+          document.getElementById('status').innerHTML =
+            'Time synced!<br>UTC: ' + data.utc +
+            '<br><br>You can disconnect from the OTPi network now.';
+        } else {
+          document.getElementById('status').className = 'status err';
+          document.getElementById('status').textContent = 'Sync failed: ' + (data.error || 'unknown');
+        }
+      })
+      .catch(function(e) {
+        document.getElementById('status').className = 'status err';
+        document.getElementById('status').textContent = 'Connection error: ' + e;
+      });
+    })();
+  </script>
+</body></html>
+"""
+
+
+class _TimeSyncHandler(BaseHTTPRequestHandler):
+    """Minimal handler for time sync AP."""
+
+    def log_message(self, *args):
+        pass  # suppress logs
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(_TIME_SYNC_HTML.encode("utf-8"))
+
+    def do_POST(self):
+        if self.path == "/set_time":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length).decode("utf-8")
+                data = json.loads(body)
+                epoch = int(data.get("epoch", 0))
+
+                if epoch < 1700000000:  # sanity check: after ~2023
+                    raise ValueError(f"Epoch too old: {epoch}")
+
+                # Set system time from epoch
+                import datetime
+                dt = datetime.datetime.utcfromtimestamp(epoch)
+                time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                result = subprocess.run(
+                    ["sudo", "date", "-u", "-s", time_str],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"date command failed: {result.stderr}")
+
+                print(f"[TIME SYNC] Set clock to {time_str} UTC (epoch={epoch})")
+
+                resp = json.dumps({"ok": True, "utc": time_str})
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(resp.encode("utf-8"))
+
+                # Signal server to stop after a brief delay
+                self.server.time_synced = True
+
+            except Exception as e:
+                print(f"[TIME SYNC] Error: {e}")
+                resp = json.dumps({"ok": False, "error": str(e)})
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(resp.encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+
+def run_time_sync_server(host: str = "0.0.0.0", port: int = 80, timeout: int = 120) -> bool:
+    """
+    Start a minimal web server for phone-based time sync.
+    Returns True if time was successfully synced, False if timeout.
+    """
+    srv = HTTPServer((host, port), _TimeSyncHandler)
+    srv.time_synced = False
+    srv.timeout = 2.0  # check every 2 seconds
+
+    print(f"[TIME SYNC] Server listening on http://{host}:{port}")
+
+    import time as _t
+    start = _t.time()
+    while _t.time() - start < timeout:
+        srv.handle_request()
+        if srv.time_synced:
+            print("[TIME SYNC] Sync complete, shutting down server")
+            srv.server_close()
+            return True
+
+    print("[TIME SYNC] Timeout — no sync received")
+    srv.server_close()
+    return False
+
+
+def save_offline_mode(enabled: bool):
+    """Save offline mode preference to user_settings.json."""
+    settings_file = PROJECT_DIR / "user_settings.json"
+    settings = {}
+    try:
+        if settings_file.exists():
+            with open(settings_file) as f:
+                settings = json.load(f)
+    except Exception:
+        pass
+
+    settings["offline_mode"] = enabled
+    with open(settings_file, "w") as f:
+        json.dump(settings, f, indent=2)
+    print(f"[DEBUG] Saved offline_mode={enabled} to user_settings.json")
+
+
+def is_offline_mode() -> bool:
+    """Check if offline mode is enabled."""
+    settings_file = PROJECT_DIR / "user_settings.json"
+    try:
+        if settings_file.exists():
+            with open(settings_file) as f:
+                settings = json.load(f)
+            return bool(settings.get("offline_mode", False))
+    except Exception:
+        pass
+    return False

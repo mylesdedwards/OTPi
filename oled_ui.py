@@ -36,6 +36,7 @@ class ResetAction:
     BOTH = "both"
     SYNC_TIME = "sync_time"
     WIFI_TOGGLE = "wifi_toggle"
+    LED_TEST = "led_test"
 
 class OledUI:
     """
@@ -44,7 +45,7 @@ class OledUI:
       1 Settings (Color + Brightness: scroll to select, click to edit, click to exit)
       2 Language (rotate to pick, press to confirm)
       3 Debug (IP, SSID, UTC time, version)
-      4 Options menu (Next, Sync Time, Reset Wi-Fi, Reset QR, Reset Both)
+      4 Options menu (scrolling: Next, WiFi Toggle, Sync Time, Resets, LED Test)
       5 Confirm screen (PRESS = confirm; ROTATE = cancel/back)
     """
     def __init__(self, oled, initial_hue: float, user_brightness_pct: int):
@@ -106,6 +107,10 @@ class OledUI:
 
         # Offline mode flag
         self._offline = bool(saved_settings.get("offline_mode", False))
+
+        # Options menu scroll window
+        self._opts_scroll_top = 0  # index of first visible item
+        self._opts_visible = 5     # max visible items at once
 
         print(f"[UI] Initialized on screen {self.screen}")
         print(f"[UI] Loaded settings: hue={self.hue:.3f}, brightness={self.user_pct}%, lang={self._lang_codes[self._lang_idx]}")
@@ -310,22 +315,34 @@ class OledUI:
             if pressed_edge and can_change_screen:
                 self.screen = 4
                 self.selection = 0
+                self._opts_scroll_top = 0
                 self._last_screen_change = now
 
         elif self.screen == 4:  # Options menu
             # Build dynamic menu based on mode
             if self._offline:
-                # Offline: Next, Turn WiFi On, Sync Time, Reset WiFi, Reset QR, Reset Both
                 menu_actions = [None, ResetAction.WIFI_TOGGLE, ResetAction.SYNC_TIME,
-                                ResetAction.WIFI, ResetAction.QR, ResetAction.BOTH]
+                                ResetAction.WIFI, ResetAction.QR, ResetAction.BOTH,
+                                ResetAction.LED_TEST]
             else:
-                # Online: Next, Turn WiFi Off, Reset WiFi, Reset QR, Reset Both
                 menu_actions = [None, ResetAction.WIFI_TOGGLE,
-                                ResetAction.WIFI, ResetAction.QR, ResetAction.BOTH]
+                                ResetAction.WIFI, ResetAction.QR, ResetAction.BOTH,
+                                ResetAction.LED_TEST]
 
             menu_count = len(menu_actions)
             if step:
                 self.selection = (self.selection + step) % menu_count
+                # Adjust scroll window to keep selection visible
+                if self.selection < self._opts_scroll_top:
+                    self._opts_scroll_top = self.selection
+                elif self.selection >= self._opts_scroll_top + self._opts_visible:
+                    self._opts_scroll_top = self.selection - self._opts_visible + 1
+                # Handle wrap-around
+                if step > 0 and self.selection == 0:
+                    self._opts_scroll_top = 0
+                elif step < 0 and self.selection == menu_count - 1:
+                    self._opts_scroll_top = max(0, menu_count - self._opts_visible)
+
             if pressed_edge and can_change_screen:
                 action_val = menu_actions[self.selection]
                 if action_val is None:
@@ -336,6 +353,9 @@ class OledUI:
                     self.screen = 0
                 elif action_val == ResetAction.SYNC_TIME:
                     reset_action = ResetAction.SYNC_TIME
+                    self.screen = 0
+                elif action_val == ResetAction.LED_TEST:
+                    reset_action = ResetAction.LED_TEST
                     self.screen = 0
                 elif action_val in (ResetAction.WIFI, ResetAction.QR, ResetAction.BOTH):
                     self.screen = 5
@@ -537,18 +557,40 @@ class OledUI:
                 elif self.screen == 4:
                     wifi_label = "Turn WiFi On" if self._offline else "Turn WiFi Off"
                     if self._offline:
-                        opts = [t("next_screen"), wifi_label, "Sync Time", t("reset_wifi"), t("reset_qr"), t("reset_both")]
+                        opts = [t("next_screen"), wifi_label, "Sync Time", t("reset_wifi"), t("reset_qr"), t("reset_both"), "LED Test"]
                     else:
-                        opts = [t("next_screen"), wifi_label, t("reset_wifi"), t("reset_qr"), t("reset_both")]
+                        opts = [t("next_screen"), wifi_label, t("reset_wifi"), t("reset_qr"), t("reset_both"), "LED Test"]
+
+                    # Pinned title
                     draw.text((0, 0), "-- Options --", fill=1)
+
+                    # Scrolling item window
+                    visible_count = min(self._opts_visible, len(opts))
                     y = 12
-                    for i, s in enumerate(opts):
+                    for i in range(self._opts_scroll_top, self._opts_scroll_top + visible_count):
+                        if i >= len(opts):
+                            break
                         prefix = ">" if i == self.selection else " "
-                        text = f"{prefix} {s}"
-                        if len(text) > 20:
-                            text = text[:19] + "..."
+                        text = f"{prefix} {opts[i]}"
+                        if len(text) > 18:
+                            text = text[:17] + "..."
                         draw.text((0, y), text, fill=1)
-                        y += 9
+                        y += 10
+
+                    # Scroll bar on right edge (only if more items than visible)
+                    if len(opts) > self._opts_visible:
+                        track_top = 12
+                        track_bottom = 62
+                        track_height = track_bottom - track_top
+                        track_x = 124
+
+                        # Draw track line
+                        draw.line([(track_x, track_top), (track_x, track_bottom)], fill=1)
+
+                        # Draw position indicator
+                        bar_height = max(4, int(track_height * self._opts_visible / len(opts)))
+                        bar_pos = track_top + int((track_height - bar_height) * self.selection / (len(opts) - 1))
+                        draw.rectangle([track_x - 2, bar_pos, track_x + 2, bar_pos + bar_height], fill=1)
 
                 elif self.screen == 5:
                     label = {

@@ -421,6 +421,63 @@ def run_totp_display(secret: str, settings: dict, oled, encoder, wifi_watchdog=N
                 # After sync, continue normal operation
                 continue
 
+            if action == ResetAction.LED_TEST:
+                print("[DEBUG] Starting LED test...")
+                if strip is not None:
+                    import time as _t
+
+                    test_colors = [
+                        ("RED",   (255, 0, 0)),
+                        ("GREEN", (0, 255, 0)),
+                        ("BLUE",  (0, 0, 255)),
+                        ("WHITE", (255, 255, 255)),
+                    ]
+
+                    for color_name, color_val in test_colors:
+                        # Show current test color on OLED
+                        if oled:
+                            try:
+                                from luma.core.render import canvas
+                                with canvas(oled) as draw:
+                                    draw.text((0, 0), "-- LED TEST --", fill=1)
+                                    draw.text((0, 20), f"Testing: {color_name}", fill=1)
+                                    draw.text((0, 44), "Check all LEDs", fill=1)
+                            except Exception:
+                                pass
+
+                        # Light all LEDs with the test color
+                        try:
+                            strip.fill(color_val)
+                            strip.show()
+                        except Exception as e:
+                            print(f"[LED TEST] Error: {e}")
+
+                        _t.sleep(3)
+
+                    # Show complete message
+                    if oled:
+                        try:
+                            from luma.core.render import canvas
+                            with canvas(oled) as draw:
+                                draw.text((0, 0), "-- LED TEST --", fill=1)
+                                draw.text((0, 20), "Test complete!", fill=1)
+                                draw.text((0, 44), "Returning...", fill=1)
+                        except Exception:
+                            pass
+
+                    # Blank LEDs before returning to normal
+                    try:
+                        strip.fill((0, 0, 0))
+                        strip.show()
+                    except Exception:
+                        pass
+
+                    _t.sleep(1)
+                    print("[DEBUG] LED test complete")
+                else:
+                    print("[DEBUG] LED test skipped — no LED strip available")
+                continue
+
             if action in (ResetAction.WIFI, ResetAction.QR, ResetAction.BOTH):
                 print(f"[DEBUG] Executing reset action: {action}")
                 # Pass the LED strip to reset function for proper cleanup
